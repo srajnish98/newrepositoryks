@@ -1,4 +1,4 @@
-name: Selenium High-Performance Regression (16GB Runner)
+name: Selenium Manual Scaling (16GB Runner)
 
 on:
   workflow_dispatch:
@@ -16,45 +16,38 @@ on:
         default: 'qa'
         type: choice
         options: [qa, dev, stage, uat, prod]
+      node_count:
+        description: 'Manual Browser Count (Max 14 recommended)'
+        required: true
+        default: '14'
 
 jobs:
   automation:
-    # Optimized for ubuntu-latest-m (16GB RAM)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. INFRASTRUCTURE RETRY LOGIC
+      # 1. CLUSTER SETUP
       - name: Setup K8s (Kind) with Retry
         run: |
           for i in {1..3}; do
-            echo "Attempt $i: Creating Kind Cluster..."
             kind create cluster --name selenium-grid --wait 300s && break || {
-              echo "Kind failed. Cleaning up and retrying..."
               kind delete cluster --name selenium-grid
-              sleep 15
+              sleep 10
             }
           done
 
-      # 2. SMART HARDWARE DETECTION
-      - name: Calculate Browser Capacity
+      # 2. VALIDATE CAPACITY
+      - name: Determine Browser Capacity
         id: hardware
         run: |
-          # 16GB RAM allows ~14 Chrome instances (1GB each + OS/K8s overhead)
-          TOTAL_RAM=$(free -g | awk '/^Mem:/{print $2}')
-          echo "Detected RAM: ${TOTAL_RAM}GB"
-          
-          # Calculation: Total RAM minus 2GB for Hub/K8s/OS
-          CALC_NODES=$((TOTAL_RAM - 2))
-          
-          # Cap at 14 to avoid CPU thrashing on 4 cores
-          [ "$CALC_NODES" -gt 14 ] && FINAL=14 || FINAL=$CALC_NODES
-          
+          USER_REQ=${{ github.event.inputs.node_count }}
+          # Limit to 14 for stability on 4-core machine
+          [ "$USER_REQ" -gt 14 ] && FINAL=14 || FINAL=$USER_REQ
           echo "nodes=$FINAL" >> $GITHUB_OUTPUT
-          echo "Setting Parallel Threads to: $FINAL"
 
-      # 3. DEPLOY SELENIUM GRID 4
+      # 3. DEPLOY GRID
       - name: Deploy Selenium Grid
         run: |
           REPLICAS=${{ steps.hardware.outputs.nodes }}
@@ -65,14 +58,10 @@ jobs:
             name: selenium-hub
           spec:
             ports:
-              - name: hub-api
-                port: 4444
-              - name: bus-publish
-                port: 4442
-              - name: bus-subscribe
-                port: 4443
-            selector:
-              app: selenium-hub
+              - {name: hub, port: 4444}
+              - {name: pub, port: 4442}
+              - {name: sub, port: 4443}
+            selector: {app: selenium-hub}
           ---
           apiVersion: apps/v1
           kind: Deployment
@@ -80,19 +69,14 @@ jobs:
             name: selenium-hub
           spec:
             replicas: 1
-            selector:
-              matchLabels:
-                app: selenium-hub
+            selector: {matchLabels: {app: selenium-hub}}
             template:
-              metadata:
-                labels:
-                  app: selenium-hub
+              metadata: {labels: {app: selenium-hub}}
               spec:
                 containers:
                 - name: selenium-hub
                   image: selenium/hub:4.16.1
-                  resources:
-                    requests: {cpu: "500m", memory: "1Gi"}
+                  resources: {requests: {cpu: "500m", memory: "1Gi"}}
           ---
           apiVersion: apps/v1
           kind: Deployment
@@ -100,74 +84,46 @@ jobs:
             name: selenium-node-chrome
           spec:
             replicas: $REPLICAS
-            selector:
-              matchLabels:
-                app: selenium-node-chrome
+            selector: {matchLabels: {app: selenium-node-chrome}}
             template:
-              metadata:
-                labels:
-                  app: selenium-node-chrome
+              metadata: {labels: {app: selenium-node-chrome}}
               spec:
                 containers:
                 - name: selenium-node-chrome
                   image: selenium/node-chrome:130.0
                   env:
-                  - name: SE_EVENT_BUS_HOST
-                    value: selenium-hub
-                  - name: SE_EVENT_BUS_PUBLISH_PORT
-                    value: "4442"
-                  - name: SE_EVENT_BUS_SUBSCRIBE_PORT
-                    value: "4443"
-                  - name: SE_NODE_MAX_SESSIONS
-                    value: "1"
-                  - name: SE_NODE_SESSION_TIMEOUT
-                    value: "60"
-                  volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm
-                volumes:
-                - name: dshm
-                  emptyDir: {medium: Memory, sizeLimit: "2Gi"}
+                  - {name: SE_EVENT_BUS_HOST, value: selenium-hub}
+                  - {name: SE_EVENT_BUS_PUBLISH_PORT, value: "4442"}
+                  - {name: SE_EVENT_BUS_SUBSCRIBE_PORT, value: "4443"}
+                  - {name: SE_NODE_MAX_SESSIONS, value: "1"}
+                  volumeMounts: [{name: dshm, mountPath: /dev/shm}]
+                volumes: [{name: dshm, emptyDir: {medium: Memory, sizeLimit: "2Gi"}}]
           EOF
 
-      # 4. EXECUTION WITH GLOBAL TIMEOUT & PORT FORWARD
-      - name: Run Maven Regression
+      # 4. EXECUTION
+      - name: Run Maven
         run: |
-          echo "Waiting for pods to be ready..."
           kubectl rollout status deployment/selenium-node-chrome --timeout=300s
-          
-          echo "Opening Tunnel to Grid..."
           kubectl port-forward service/selenium-hub 4444:4444 > pf.log 2>&1 &
-          
-          echo "Checking Selenium Grid Health..."
           timeout 120s bash -c 'until curl -s http://localhost:4444/status | grep "\"ready\": true"; do sleep 5; done'
           
-          echo "Starting Maven with ${{ steps.hardware.outputs.nodes }} threads..."
-          # Note: 'remote' must be true in your config.properties or passed here
           mvn test -DsuiteXmlFile=src/test/resources/${{ github.event.inputs.suite_name }} \
                    -DthreadCount=${{ steps.hardware.outputs.nodes }} \
                    -Denv=${{ github.event.inputs.test_env }} \
                    -Dremote=true \
                    -Dhuburl=http://localhost:4444/wd/hub
-        env:
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
 
-      # 5. RESULTS & ARTIFACTS
-      - name: Upload Test Evidence
+      # 5. REPORTING
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Full-Test-Report-${{ github.run_id }}
+          name: Results-Browsers-${{ steps.hardware.outputs.nodes }}
           path: |
             target/surefire-reports/
             target/chaintest/
             allure-results/
-            pf.log
-          retention-days: 5
 
-      # 6. INFRASTRUCTURE CLEANUP
       - name: Cleanup
         if: always()
-        run: |
-          sudo killall kubectl || true
-          kind delete cluster --name selenium-cluster || true
+        run: kind delete cluster --name selenium-grid || true
