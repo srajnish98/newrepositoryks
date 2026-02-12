@@ -1,0 +1,164 @@
+name: Selenium 400+ Test Suite (16GB Runner Optimized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite_name:
+        description: 'Choose Suite'
+        required: true
+        type: choice
+        options:
+          - regression-suites.xml
+          - sanity-suites.xml
+      test_group:
+        description: 'Filter by Group'
+        required: false
+        default: 'all'
+
+jobs:
+  automation:
+    # Optimized for your 4-core, 16GB RAM runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. RETRY LOGIC FOR INFRASTRUCTURE
+      - name: Setup K8s (Kind) with Retry
+        run: |
+          for i in {1..3}; do
+            echo "Attempt $i: Creating Kind Cluster..."
+            kind create cluster --name selenium-cluster --wait 300s && break || {
+              echo "Kind failed. Cleaning up..."
+              kind delete cluster --name selenium-cluster
+              sleep 15
+            }
+          done
+
+      # 2. DYNAMIC XML SCANNER (Optimized for 16GB RAM)
+      - name: Calculate Parallel Capacity
+        id: scanner
+        run: |
+          XML_PATH=$(find . -name "${{ github.event.inputs.suite_name }}" | head -n 1)
+          # With 16GB RAM, we can push to 14 parallel browsers (Chrome uses ~1GB/session)
+          TEST_COUNT=$(grep -c "<test " $XML_PATH || echo 4)
+          [ "$TEST_COUNT" -gt 14 ] && FINAL=14 || FINAL=$TEST_COUNT
+          echo "nodes=$FINAL" >> $GITHUB_OUTPUT
+          echo "Scaling to $FINAL nodes based on suite size."
+
+      # 3. DEPLOY GRID (With Event Bus Fixes)
+      - name: Deploy Selenium Grid
+        run: |
+          REPLICAS=${{ steps.scanner.outputs.nodes }}
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: selenium-hub
+          spec:
+            ports:
+              - name: hub-api
+                port: 4444
+              - name: bus-publish
+                port: 4442
+              - name: bus-subscribe
+                port: 4443
+            selector:
+              app: selenium-hub
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: selenium-hub
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: selenium-hub
+            template:
+              metadata:
+                labels:
+                  app: selenium-hub
+              spec:
+                containers:
+                - name: selenium-hub
+                  image: selenium/hub:4.16.1
+                  resources:
+                    requests: {cpu: "500m", memory: "1Gi"}
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: selenium-node-chrome
+          spec:
+            replicas: $REPLICAS
+            selector:
+              matchLabels:
+                app: selenium-node-chrome
+            template:
+              metadata:
+                labels:
+                  app: selenium-node-chrome
+              spec:
+                containers:
+                - name: selenium-node-chrome
+                  image: selenium/node-chrome:130.0
+                  env:
+                  - name: SE_EVENT_BUS_HOST
+                    value: selenium-hub
+                  - name: SE_EVENT_BUS_PUBLISH_PORT
+                    value: "4442"
+                  - name: SE_EVENT_BUS_SUBSCRIBE_PORT
+                    value: "4443"
+                  - name: SE_NODE_MAX_SESSIONS
+                    value: "1"
+                  - name: SE_NODE_OVERRIDE_MAX_SESSIONS
+                    value: "true"
+                  volumeMounts:
+                  - mountPath: /dev/shm
+                    name: dshm
+                volumes:
+                - name: dshm
+                  emptyDir: {medium: Memory, sizeLimit: "2Gi"}
+          EOF
+
+      # 4. ROBUST EXECUTION
+      - name: Run Maven Tests
+        run: |
+          kubectl rollout status deployment/selenium-node-chrome --timeout=300s
+          kubectl port-forward service/selenium-hub 4444:4444 > pf.log 2>&1 &
+          
+          # Health Check Loop
+          timeout 120s bash -c 'until curl -s http://localhost:4444/status | grep "\"ready\": true"; do sleep 5; done'
+          
+          # Setup Group logic
+          if [ "${{ github.event.inputs.test_group }}" == "all" ]; then
+            GROUP_OPTS=""
+          else
+            GROUP_OPTS="-Dgroups=${{ github.event.inputs.test_group }}"
+          fi
+
+          mvn test -DsuiteXmlFile=src/test/resources/${{ github.event.inputs.suite_name }} \
+                   -DthreadCount=${{ steps.scanner.outputs.nodes }} \
+                   $GROUP_OPTS \
+                   -Dsurefire.rerunFailingTestsCount=1
+        env:
+          SELENIUM_REMOTE_URL: http://localhost:4444/wd/hub
+
+      # 5. TESTNG REPORT & EVIDENCE COLLECTION
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Test-Evidence-${{ github.run_id }}
+          path: |
+            target/surefire-reports/
+            target/screenshots/
+            target/site/
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo killall kubectl || true
+          kind delete cluster --name selenium-cluster || true
