@@ -27,73 +27,61 @@ import io.qameta.allure.Description;
 
 //@Listeners(ChainTestListener.class)
 public class BaseTest {
-	
+
 	WebDriver driver;
-	
+
 	DriverFactory df;
 	protected Properties prop;
-	
+
 	protected LoginPage loginPage;
 	protected AccountsPage accPage;
 	protected SearchResultsPage searchResultsPage;
 	protected ProductInfoPage productInfoPage;
 	protected RegisterPage registerPage;
-	
+
 	private static final Logger log = LogManager.getLogger(BaseTest.class);
 
-	
 	@Description("init the driver and properties")
-	@Parameters({"browser", "browserversion", "testname"})
+
 	@BeforeTest
-	public void setup(String browserName, String browserVersion, String testname) {
+	public void setup() {
 		df = new DriverFactory();
 		prop = df.initProp();
+
+	}
+
+	@Parameters({ "browser", "browserversion", "testname" })
+	@BeforeMethod
+	public void setup(String browserName, String browserVersion, String testname) {
+		// Override browser from XML if provided
+		// browserName is passed from .xml file
+		df = new DriverFactory();	   
+	    if (browserName != null) {
+	        prop.setProperty("browser", browserName);
+	    }
+	    if (browserVersion != null) {
+	        prop.setProperty("browserversion", browserVersion);
+	    }
+	    if (testname != null) {
+	        prop.setProperty("testname", testname);
+	    }
+			// Launch a NEW browser for EVERY @Test method
+			driver = df.initDriver(prop);
+			loginPage = new LoginPage(driver);
 		
-			//browserName is passed from .xml file
-			if(browserName!=null) {
-				prop.setProperty("browser", browserName);
-				prop.setProperty("browserversion", browserVersion);
-				prop.setProperty("testname", testname);
+	}
 
-			}
-			
-//	@Parameters({ "browser" })
-//	@BeforeTest
-//	public void setup(String browserName) {
-//		df = new DriverFactory();
-//		prop = df.initProp();
-
-//		// browserName is passed from .xml file
-//		if (browserName != null) {
-//			prop.setProperty("browser", browserName);
-////						prop.setProperty("browserversion", browserVersion);
-////						prop.setProperty("testname", testname);
-//
-//		}
-
-		driver = df.initDriver(prop);// login page
-		loginPage = new LoginPage(driver);
-	}	
-	
-	@AfterMethod //will be running after each @test method
+	@AfterMethod // will be running after each @test method
 	public void attachScreenshot(ITestResult result) {
-		if(!result.isSuccess()) {//only for failure test cases -- true
+		if (!result.isSuccess()) {// only for failure test cases -- true
 			log.info("---screenshot is taken---");
 			ChainTestListener.embed(DriverFactory.getScreenshotFile(), "image/png");
 		}
-		
-		//ChainTestListener.embed(DriverFactory.getScreenshotFile(), "image/png");
 
+		if (driver != null) {
+			driver.quit();
+		}
 
 	}
-	
-	
-	@Description("closing the browser..")
-	@AfterTest
-	public void tearDown() {
-		driver.quit();
-		log.info("----closing the browser----");
-	}
-	
 
 }

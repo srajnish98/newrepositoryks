@@ -140,7 +140,7 @@ public class DriverFactory {
 	 * getDriver: get the local thready copy of the driver
 	 */
 
-	public static WebDriver getDriver() {
+	public static synchronized WebDriver getDriver() {
 		return tlDriver.get();
 	}
 

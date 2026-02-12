@@ -28,7 +28,9 @@ public class OptionsManager {
 		}
 		if (Boolean.parseBoolean(prop.getProperty("remote"))) {
 			co.setCapability("browserName", "chrome");			
-			co.setBrowserVersion(prop.getProperty("browserversion").trim());			
+			co.setBrowserVersion(prop.getProperty("browserversion").trim());
+			co.addArguments("--disable-dev-shm-usage"); 
+		    co.addArguments("--no-sandbox");
 
 			Map<String, Object> selenoidOptions = new HashMap<>();
 			selenoidOptions.put("screenResolution", "1280x1024x24");
