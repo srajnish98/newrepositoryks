@@ -118,12 +118,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Results-Browsers-${{ steps.hardware.outputs.nodes }}
+          name: Test-Results-Browsers-${{ steps.hardware.outputs.nodes }}
           path: |
             target/surefire-reports/
             target/chaintest/
             allure-results/
-
+          if-no-files-found: warn
+          retention-days: 5
       - name: Cleanup
         if: always()
         run: kind delete cluster --name selenium-grid || true
